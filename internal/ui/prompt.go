@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mattn/go-isatty"
 )
 
 // ErrNoAnswer reports a non-terminal stdin timeout or a prompt attempted after
@@ -26,9 +28,11 @@ type lineResult struct {
 }
 
 var (
-	stdinOnce      sync.Once
-	stdinReader    *bufio.Reader
-	stdinExhausted bool
+	stdinOnce        sync.Once
+	stdinReader      *bufio.Reader
+	stdinExhausted   bool
+	isTerminal       = isatty.IsTerminal
+	isCygwinTerminal = isatty.IsCygwinTerminal
 )
 
 // promptReader is one reader for the whole process. bufio pulls a whole chunk
@@ -104,6 +108,6 @@ func readLine() (string, error) {
 }
 
 func stdinIsTerminal() bool {
-	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
+	fd := os.Stdin.Fd()
+	return isTerminal(fd) || isCygwinTerminal(fd)
 }

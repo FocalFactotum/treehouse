@@ -24,6 +24,87 @@ func withStdin(t *testing.T, r *os.File) {
 	})
 }
 
+func TestConfirmTerminalWaitsForDelayedAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		native bool
+		cygwin bool
+	}{
+		{name: "native", native: true},
+		{name: "cygwin", cygwin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, w, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			defer w.Close()
+			withStdin(t, r)
+
+			oldNative, oldCygwin, oldWait := isTerminal, isCygwinTerminal, stdinAnswerWait
+			t.Cleanup(func() {
+				isTerminal, isCygwinTerminal, stdinAnswerWait = oldNative, oldCygwin, oldWait
+			})
+			isTerminal = func(fd uintptr) bool {
+				if fd != r.Fd() {
+					t.Errorf("native terminal check used fd %v, want %v", fd, r.Fd())
+				}
+				return tc.native
+			}
+			isCygwinTerminal = func(fd uintptr) bool {
+				if fd != r.Fd() {
+					t.Errorf("Cygwin terminal check used fd %v, want %v", fd, r.Fd())
+				}
+				return tc.cygwin
+			}
+			stdinAnswerWait = 10 * time.Millisecond
+
+			type answer struct {
+				ok  bool
+				err error
+			}
+			done := make(chan answer, 1)
+			go func() {
+				ok, err := Confirm("ok?", false)
+				done <- answer{ok, err}
+			}()
+			select {
+			case result := <-done:
+				t.Fatalf("terminal prompt returned before answer: %+v", result)
+			case <-time.After(100 * time.Millisecond):
+			}
+			if _, err := w.WriteString("y\n"); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case result := <-done:
+				if result.err != nil || !result.ok {
+					t.Fatalf("expected delayed terminal confirmation, got %+v", result)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("terminal prompt did not consume the answer")
+			}
+		})
+	}
+}
+
+func TestConfirmNullDeviceIsNotTerminal(t *testing.T) {
+	r, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	withStdin(t, r)
+
+	if stdinIsTerminal() {
+		t.Fatal("null device classified as an interactive terminal")
+	}
+	if _, err := Confirm("ok?", true); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF from null stdin, got %v", err)
+	}
+}
+
 func TestConfirmOpenUnwrittenPipeFailsClosed(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
