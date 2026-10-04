@@ -953,3 +953,50 @@ func TestReturnAllNeverPromptsOnAMarkerlessSlot(t *testing.T) {
 		t.Fatalf("expected the lease cleared and the slot left for destroy, got %+v", entries)
 	}
 }
+
+// TestReturnDirtyOnAnOpenUnwrittenPipeFailsClosed pins the usual CI and agent
+// harness shape: stdin is a pipe that stays open and is never written. The
+// confirmation cannot be answered, so it must take the same fail-closed path as
+// a closed stdin (exit 3, changes kept) instead of blocking forever.
+func TestReturnDirtyOnAnOpenUnwrittenPipeFailsClosed(t *testing.T) {
+	repoDir, homeDir := setupTestRepo(t)
+
+	lease := acquireLeaseJSON(t, repoDir, homeDir, "agent-a")
+	if err := os.WriteFile(filepath.Join(lease.Path, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ret := exec.Command(treehouseBin, "return", lease.Path)
+	ret.Dir = repoDir
+	ret.Env = buildEnv(homeDir)
+	stdin, err := ret.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	var errBuf bytes.Buffer
+	ret.Stderr = &errBuf
+
+	if err := ret.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- ret.Wait() }()
+
+	select {
+	case runErr := <-waitErr:
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != ExitNotReturned {
+			t.Fatalf("expected exit %d, got %v: %s", ExitNotReturned, runErr, errBuf.String())
+		}
+		if !strings.Contains(errBuf.String(), "--force") {
+			t.Fatalf("expected the --force hint, got: %s", errBuf.String())
+		}
+	case <-time.After(60 * time.Second):
+		_ = ret.Process.Kill()
+		t.Fatal("return blocked on an open pipe nobody writes to")
+	}
+	if got := gitCmd(t, lease.Path, "status", "--porcelain"); got == "" {
+		t.Fatal("expected the unanswered slot to keep its uncommitted changes")
+	}
+}
