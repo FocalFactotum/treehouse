@@ -25,14 +25,10 @@ type lineResult struct {
 	err  error
 }
 
-// pendingRead is a read still in flight after its prompt gave up, so a later
-// prompt waits on that read instead of starting a second one on the same
-// reader.
-var pendingRead chan lineResult
-
 var (
-	stdinOnce   sync.Once
-	stdinReader *bufio.Reader
+	stdinOnce      sync.Once
+	stdinReader    *bufio.Reader
+	stdinExhausted bool
 )
 
 // promptReader is one reader for the whole process. bufio pulls a whole chunk
@@ -82,24 +78,25 @@ func Confirm(message string, defaultYes bool) (bool, error) {
 // answers. Any other stdin is given stdinAnswerWait to deliver the line and is
 // otherwise reported as ErrNoAnswer.
 func readLine() (string, error) {
+	if stdinExhausted {
+		return "", ErrNoAnswer
+	}
 	if stdinIsTerminal() {
 		return promptReader().ReadString('\n')
 	}
-	if pendingRead == nil {
-		ch := make(chan lineResult, 1)
-		pendingRead = ch
-		go func() {
-			line, err := promptReader().ReadString('\n')
-			ch <- lineResult{line, err}
-		}()
-	}
+	reader := promptReader()
+	ch := make(chan lineResult, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		ch <- lineResult{line, err}
+	}()
 	timer := time.NewTimer(stdinAnswerWait)
 	defer timer.Stop()
 	select {
-	case r := <-pendingRead:
-		pendingRead = nil
+	case r := <-ch:
 		return r.line, r.err
 	case <-timer.C:
+		stdinExhausted = true
 		return "", ErrNoAnswer
 	}
 }

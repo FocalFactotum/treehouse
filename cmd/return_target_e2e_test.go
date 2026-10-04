@@ -1000,3 +1000,69 @@ func TestReturnDirtyOnAnOpenUnwrittenPipeFailsClosed(t *testing.T) {
 		t.Fatal("expected the unanswered slot to keep its uncommitted changes")
 	}
 }
+
+func TestReturnAllDiscardsAnswersAfterTimeout(t *testing.T) {
+	repoDir, homeDir := setupTestRepo(t)
+	first := acquireLeaseJSON(t, repoDir, homeDir, "agent-a")
+	second := acquireLeaseJSON(t, repoDir, homeDir, "agent-b")
+	if first.Path == second.Path {
+		t.Fatalf("expected two distinct slots, both are %s", first.Path)
+	}
+	for _, path := range []string{first.Path, second.Path} {
+		if err := os.WriteFile(filepath.Join(path, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, stdin, stderr := startReturnAllAtDirtyPrompt(t, repoDir, homeDir)
+	defer stdin.Close()
+	defer stderr.Close()
+	type result struct {
+		output string
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		if err := readUntilSuffix(stderr, "left as found: its uncommitted changes were kept.\n"); err != nil {
+			done <- result{err: err}
+			return
+		}
+		_, _ = io.WriteString(stdin, "y\n")
+		rest, err := io.ReadAll(stderr)
+		waitErr := all.Wait()
+		if err != nil {
+			done <- result{output: string(rest), err: err}
+			return
+		}
+		done <- result{output: string(rest), err: waitErr}
+	}()
+
+	select {
+	case got := <-done:
+		var exitErr *exec.ExitError
+		if !errors.As(got.err, &exitErr) || exitErr.ExitCode() != ExitNotReturned {
+			t.Fatalf("expected exit %d, got %v: %s", ExitNotReturned, got.err, got.output)
+		}
+		if !strings.Contains(got.output, "Returned 0 of 2 held worktree(s)") {
+			t.Fatalf("expected neither dirty slot returned, got: %s", got.output)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("return --all blocked after a confirmation timed out")
+	}
+
+	for _, path := range []string{first.Path, second.Path} {
+		data, err := os.ReadFile(filepath.Join(path, "README.md"))
+		if err != nil || string(data) != "dirty\n" {
+			t.Fatalf("expected %s to keep its changes, data=%q err=%v", path, data, err)
+		}
+	}
+	entries := statusEntries(t, repoDir, homeDir)
+	if len(entries) != 2 {
+		t.Fatalf("expected two slots, got %+v", entries)
+	}
+	for _, entry := range entries {
+		if entry.Status != "leased" {
+			t.Fatalf("expected unanswered slot to stay leased, got %+v", entry)
+		}
+	}
+}
