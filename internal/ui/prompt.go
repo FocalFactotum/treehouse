@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// ErrNoAnswer reports that a prompt on a non-terminal stdin received no answer
-// within stdinAnswerWait. Callers treat it like EOF: the prompt is unanswered.
+// ErrNoAnswer reports a non-terminal stdin timeout or a prompt attempted after
+// one. Callers treat it like EOF: the prompt is unanswered.
 var ErrNoAnswer = errors.New("no answer on stdin")
 
 // stdinAnswerWait bounds how long a prompt waits for an answer on a stdin that
@@ -76,7 +76,9 @@ func Confirm(message string, defaultYes bool) (bool, error) {
 
 // readLine reads one line from stdin. A terminal blocks until the operator
 // answers. Any other stdin is given stdinAnswerWait to deliver the line and is
-// otherwise reported as ErrNoAnswer.
+// otherwise reported as ErrNoAnswer. A timeout loses answer-to-prompt alignment,
+// so all later prompts fail immediately rather than applying a delayed answer
+// to a different worktree. The abandoned read may finish, but is never reused.
 func readLine() (string, error) {
 	if stdinExhausted {
 		return "", ErrNoAnswer
